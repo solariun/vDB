@@ -1,0 +1,8 @@
+name;age;city;phone;email
+Ana;31;Rio de Janeiro;+55 21 5550-1234;ana@example.org
+Bruno;N/A;São Paulo;+55 11 5550-9876;
+Carla;017;Recife;;carla@example.org
+Davi;45;Rio de Janeiro;+55 21 5554-0000;davi@example.org
+Eva;22;Porto Alegre;+55 51 5550-5550;eva@example.org
+Fábio;38;São Paulo;+55 11 5559-1111;fabio@example.org
+"Gil ""Junior""";29;"Belo Horizonte";+55 31 5550-2222;gil@example.org

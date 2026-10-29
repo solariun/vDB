@@ -1,0 +1,7 @@
+-std=c++11
+-Isrc
+-Itools
+-Itests
+-Wall
+-Wextra
+-Wpedantic

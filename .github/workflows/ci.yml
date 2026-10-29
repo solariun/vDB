@@ -1,0 +1,69 @@
+# Builds and tests every push and pull request on Linux (GCC) and macOS (Clang), and compiles the Arduino
+# sketches for the ESP32 and the ATmega2560 (spec 10).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} (${{ matrix.cxx }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cxx: g++
+          - os: macos-latest
+            cxx: clang++
+    runs-on: ${{ matrix.os }}
+    env:
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compiler
+        run: $CXX --version
+
+      - name: Build (make)
+        run: make -j4
+
+      - name: Unit tests (make test)
+        run: make -j4 test
+
+      - name: Unit tests with microcontroller sizes (make test_small)
+        run: make test_small
+
+      - name: Program tests (make test_tools)
+        run: make test_tools
+
+      - name: Sanitizers (make sanitize)
+        run: make sanitize
+
+      - name: Examples (make examples_run)
+        run: make examples_run
+
+      - name: Embedded check (make check_embedded)
+        run: make check_embedded
+
+  arduino:
+    name: Arduino sketches (ESP32, ATmega2560)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install the cores
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install arduino:avr
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Embedded check with the AVR and ESP32 compilers
+        run: make check_embedded
+
+      - name: Compile the sketches (make arduino_check)
+        run: make arduino_check

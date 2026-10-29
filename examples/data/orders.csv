@@ -1,0 +1,7 @@
+id;customer_id;product;quantity;price
+100;1;antenna;1;120.50
+101;1;coax cable;3;12.00
+102;2;radio;1;899.90
+103;3;antenna;2;120.50
+104;3;power supply;1;150.00
+105;9;tuner;1;210.00
