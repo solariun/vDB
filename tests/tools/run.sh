@@ -171,14 +171,17 @@ Eva
 Zoe
 EOF
 
-check memory_limit_sort 1 sh -c "yes 'x;1' | head -20000 | (echo 'a;b'; cat) | '$SEL' '* order by a' --memory-limit 256K" <<'EOF'
+# 20,000 rows of x;1 (awk, not yes | head: GNU yes reports the broken pipe on stderr).
+ROWS_20K="awk 'BEGIN { print \"a;b\"; for (i = 0; i < 20000; i++) print \"x;1\" }'"
+
+check memory_limit_sort 1 sh -c "$ROWS_20K | '$SEL' '* order by a' --memory-limit 256K" <<'EOF'
 a;b
 sel: error: out of memory
 sel: hint: the --memory-limit was reached; a filter without ORDER BY, GROUP BY or DISTINCT
      streams the file and needs little memory
 EOF
 
-check memory_limit_stream 0 sh -c "yes 'x;1' | head -20000 | (echo 'a;b'; cat) | '$SEL' \"count(*), sum(b) where a = 'x'\" --memory-limit 256K" <<'EOF'
+check memory_limit_stream 0 sh -c "$ROWS_20K | '$SEL' \"count(*), sum(b) where a = 'x'\" --memory-limit 256K" <<'EOF'
 count(*);sum(b)
 20000;20000
 EOF
