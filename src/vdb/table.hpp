@@ -52,6 +52,9 @@ public:
     RowStream* stream() const { return stream_; }
     bool stream_pending() const { return stream_ != 0 && !stream_done_; }
     void set_stream_done() { stream_done_ = true; }
+    // Streamed by a statement (or stopped by a LIMIT): its rows are gone, a later read is an error (spec L6).
+    void set_streamed() { streamed_ = stream_done_ = true; }
+    bool streamed() const { return streamed_; }
     bool load_stream(Status& status);  // reads the rest of the stream into records
 
     Allocator& allocator() const { return *allocator_; }
@@ -63,6 +66,7 @@ private:
     Vec<uint8_t*> records_;
     RowStream* stream_;
     bool stream_done_;
+    bool streamed_;
 };
 
 // Byte-string keys to dense ids 0..size-1 (grouping, DISTINCT, joins, sets).

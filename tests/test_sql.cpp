@@ -437,7 +437,7 @@ TEST(sql_errors_explain_themselves) {
     CHECK_ROWS(db, "SELECT SUM(COUNT(*)) FROM people", "ERROR: aggregate functions cannot be nested");
     CHECK_ROWS(db, "SELECT SUBSTR('a')", "ERROR: wrong number of arguments to SUBSTR (1 given)");
     CHECK_ROWS(db, "SELECT order FROM people", "ERROR: syntax error at line 1, column 8 near \"order\": expected a value or a column (quote names that are SQL words: \"order\")");
-    CHECK_ROWS(db, "SELECT ROW_NUMBER() OVER (ORDER BY name) FROM people", "ERROR: no such function: ROW_NUMBER");
+    CHECK_ROWS(db, "SELECT ROW_NUMBER() OVER (ORDER BY name) FROM people", "ERROR: not supported: window functions (OVER)");
     CHECK_ROWS(db, "SELECT COUNT(*) OVER () FROM people", "ERROR: not supported: window functions (OVER)");
     CHECK_ROWS(db, "SELECT name FROM people ORDER BY 9", "ERROR: ORDER BY position 9 is not a column of the result");
     CHECK_ROWS(db, "SELECT name FROM people LIMIT 'x'", "ERROR: LIMIT needs a number");
@@ -538,4 +538,13 @@ TEST(sql_pipeline_feeds_groups_row_by_row) {
     CHECK_ROWS(db, "SELECT * FROM t WHERE v > 0 |> SELECT COUNT(*) AS n, MAX(v) AS m", "3|3");
     CHECK_ROWS(db, "SELECT * FROM t |> SELECT DISTINCT k |> ORDER BY k DESC |> LIMIT 2", "c;b");
     CHECK_ROWS(db, "SELECT * FROM t |> LIMIT 0", "");
+}
+
+TEST(sql_unsupported_features_say_so) {
+    vdb::Database db;
+    db.exec("CREATE TABLE a (x); CREATE TABLE b (x)");
+    CHECK_ROWS(db, "SELECT * FROM a NATURAL JOIN b", "ERROR: not supported: NATURAL JOIN (use ON or USING)");
+    CHECK_ROWS(db, "SELECT ROW_NUMBER() OVER (ORDER BY x) FROM a", "ERROR: not supported: window functions (OVER)");
+    CHECK_ROWS(db, "SELECT RANK() OVER (PARTITION BY x ORDER BY (x)) FROM a", "ERROR: not supported: window functions (OVER)");
+    CHECK_ROWS(db, "SELECT NOPE(x) FROM a", "ERROR: no such function: NOPE");
 }

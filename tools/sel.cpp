@@ -203,7 +203,13 @@ bool after_comparison(const char* sql, const char* name) {
         if (!starts || !ends) continue;
         const char* p = hit;
         while (p > sql && vdb::is_space(p[-1])) --p;
-        if (p > sql && (p[-1] == '=' || p[-1] == '<' || p[-1] == '>' || p[-1] == '(' || p[-1] == ',')) return true;
+        if (p > sql && (p[-1] == '=' || p[-1] == '<' || p[-1] == '>')) return true;
+        if (p > sql && p[-1] == '(') {
+            // IN (Ana, ...): the word before the parenthesis is IN.
+            const char* q = p - 1;
+            while (q > sql && vdb::is_space(q[-1])) --q;
+            if (q - sql >= 2 && vdb::names_equal(q - 2, 2, "in") && (q - 2 == sql || !vdb::is_alpha(q[-3]))) return true;
+        }
         const char* word_end = p;
         while (p > sql && vdb::is_alpha(p[-1])) --p;
         size_t w = static_cast<size_t>(word_end - p);
@@ -337,7 +343,12 @@ int main(int argc, char** argv) {
             return k_exit_usage;
         }
         warn_bare_condition(word_count, query_words);
-        bool keyword = vdb::names_equal(query_words[0], "select") || vdb::names_equal(query_words[0], "with");
+        // The first word of the query text (it may be one quoted shell word holding the whole query).
+        const char* first = query_words[0];
+        while (vdb::is_space(*first)) ++first;
+        size_t length = 0;
+        while (vdb::is_alpha(first[length])) ++length;
+        bool keyword = vdb::names_equal(first, length, "select") || vdb::names_equal(first, length, "with");
         if (!keyword && !append(words, "SELECT")) return k_exit_sql;
         for (int i = 0; i < word_count; ++i) {
             if (!append(words, query_words[i])) return k_exit_sql;
@@ -363,7 +374,7 @@ int main(int argc, char** argv) {
 
     double start = cli::now_seconds();
     cli::FileOutput out(stdout);
-    vdb::Formatter formatter(out, settings.format, vdb::heap_allocator());
+    cli::Printer formatter(out, settings, files);
     vdb::Status status = db.run(script, formatter);
     fflush(stdout);
     files.report_notes();

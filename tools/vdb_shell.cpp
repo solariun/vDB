@@ -77,7 +77,7 @@ char* read_file(const char* path) {
 
 void run_sql(Shell& sh, const char* sql) {
     cli::FileOutput out(stdout);
-    vdb::Formatter formatter(out, sh.settings->format, vdb::heap_allocator());
+    cli::Printer formatter(out, *sh.settings, *sh.files);
     double start = cli::now_seconds();
     vdb::Status status = sh.db->run(sql, formatter);
     fflush(stdout);
@@ -266,6 +266,7 @@ void interactive(Shell& sh) {
 int main(int argc, char** argv) {
     cli::Settings settings;
     settings.streaming = false;
+    settings.implicit_stdin = false;  // in vdb a SELECT without FROM is one row (spec A9)
     settings.format.format = cli::stdout_is_terminal() ? vdb::k_format_table : vdb::k_format_csv;
     const char* command = 0;
     const char** tables = static_cast<const char**>(malloc(sizeof(char*) * static_cast<size_t>(argc + 1)));
@@ -315,6 +316,7 @@ int main(int argc, char** argv) {
     if (command) {
         run_sql(sh, command);
     } else if (!script_count || !cli::stdin_is_terminal()) {
+        settings.stdin_is_sql = true;
         interactive(sh);
     }
     files.report_notes();

@@ -22,7 +22,8 @@ sel name, age from people.csv where "age > 30" order by age desc
   aggregates.
 - **CSV in and out:** any delimiter (`;` by default) or a regular expression, quoted multi-line fields, decimal comma,
   output as CSV, TSV, a table, JSON, JSON lines or Markdown.
-- **Streaming:** a filter over a large CSV file reads one row at a time; `LIMIT 10` reads 10 rows.
+- **Streaming:** a filter over a large CSV file reads one row at a time; `LIMIT 10` reads 10 rows; `ORDER BY ... LIMIT n`
+  keeps only the top rows.
 - **Safe:** nothing throws, aborts or prints; running out of memory is an error; user values go in as escaped literals
   or `?` parameters; nesting is bounded; a syntax error changes nothing.
 - **Small machines:** memory comes from an allocator you choose — the heap, a static arena or a capped budget.
@@ -192,17 +193,24 @@ flowchart LR
 
 **In plain words.** The executor does not load a table and then filter it. A *source* (a table, or a CSV file read
 lazily) pushes one row at a time through the steps of the query. A filter keeps nothing; `GROUP BY` keeps one record
-per group; `ORDER BY` keeps only the rows it must sort. When `LIMIT` has enough rows, it tells the source to stop.
+per group; `ORDER BY` keeps the rows it must sort — and with a `LIMIT`, only the top ones. When `LIMIT` has enough
+rows, it tells the source to stop.
 
 ```mermaid
 flowchart LR
-    src["driving source<br/>table, or CSV file<br/>read row by row"] --> join["JOIN<br/>hash index for ="] --> where["WHERE"] --> group["GROUP BY<br/>one record per group"] --> proj["SELECT list"] --> dist["DISTINCT"] --> order["ORDER BY<br/>keeps projected rows"] --> limit["LIMIT"] --> out["sink<br/>Result · RowSink · next stage"]
+    src["driving source<br/>table, or CSV file<br/>read row by row"] --> join["JOIN<br/>hash index for ="] --> where["WHERE"] --> group["GROUP BY<br/>one record per group"] --> proj["SELECT list"] --> dist["DISTINCT"] --> order["ORDER BY<br/>projected rows<br/>(with LIMIT: the top ones)"] --> limit["LIMIT"] --> out["sink<br/>Result · RowSink · next stage"]
     limit -. "enough rows: stop reading" .-> src
 ```
 
-Exact rules (spec A7): a CSV table that the statement reads once, as its first FROM item, is **streamed** — never
-loaded. A pipeline stage is the sink of the stage before it. Everything else (a table read twice, a joined table, a
-subquery's table) is loaded first.
+Exact rules (spec A7, A31, L5):
+
+- A CSV table that the statement reads once, as its first FROM item, is **streamed** — never loaded. Everything else
+  (a table read twice, a joined table, a subquery's table) is loaded first.
+- A pipeline stage is the sink of the stage before it.
+- `ORDER BY` without `LIMIT` holds every projected row (plus 32 bytes per sort key per row, 16 on AVR). With `LIMIT n`
+  the buffer is sorted and trimmed to n + OFFSET rows whenever it doubles (at least 1,024 rows); the sort stays stable.
+- A stream is read once. So `sel` streams only when its SQL is one statement, and `vdb` never streams (its tables stay
+  loaded for the next statement).
 
 ### 2.4 Flexible values
 
@@ -273,17 +281,18 @@ A name that needs no shell setup works in scripts, cron and every shell (spec D5
 ### 3.2 How your words become SQL
 
 **In plain words.** The shell splits your line into words and removes the outer quotes. `sel` joins the words back
-with single spaces and puts `SELECT` in front. Then the database parses that text. A file name in FROM is not a table
+with single spaces and puts `SELECT` in front, unless the text already starts with `SELECT` or `WITH`
+(`sel "SELECT name FROM people.csv"` works too). Then the database parses that text. A file name in FROM is not a table
 yet, so the database asks the *table resolver* of `sel`, which opens the file.
 
 ```mermaid
 flowchart TB
     typed["you type:<br/>sel name, age from people.csv where #quot;age #62; 30#quot;"] --> shell["the shell splits the line into words<br/>and removes the outer quotes"]
-    shell --> argv
     subgraph argv["the words sel receives"]
         direction LR
         w1["name,"] --- w2["age"] --- w3["from"] --- w4["people.csv"] --- w5["where"] --- w6["age #62; 30"]
     end
+    shell --> argv
     argv --> joined["sel joins them with spaces<br/>and puts SELECT in front"]
     joined --> sql["SELECT name, age from people.csv where age #62; 30"]
     sql --> resolver["people.csv is not a table yet:<br/>the resolver opens the file as table people"]
@@ -309,8 +318,8 @@ Exact rules:
 - A word that starts with `-` is an option, except `-` alone (stdin as a file) and `-` followed by a digit (a negative
   number). After `--`, every word is query text. Options may come before, between or after the query words.
 - When the first word is `select` or `with` (as a word of its own), `sel` does not add another `SELECT`.
-- A table name in FROM or JOIN may be a path: `data/people.csv`, `../x.csv`, `~/a.csv`; `"my file.csv"` quotes one.
-  Its default alias is the file name without extension (`people`), so `people.name` works.
+- A table name in FROM or JOIN may be a path: `data/people.csv`, `../x.csv`, `~/a.csv`; `"my file.csv"` or
+  `'my file.csv'` quotes one. Its default alias is the file name without extension (`people`), so `people.name` works.
 - `FROM people` (no dot, no table of that name) also finds `people.csv`.
 - Files ending in `.tsv` or `.tab` use TAB as the delimiter unless `-d` is given.
 - `-`, `stdin` and `_` in FROM read stdin (when it is not a terminal). stdin can be read only once.
@@ -406,7 +415,7 @@ zsh:1: no matches found: count(*)
 | A stage after `|>` uses a column the previous stage did not select | `hint: a stage after |> sees only the columns the stage before it selected` | 1 |
 | A syntax error near a word | `hint: quote the query to keep the shell away from it` | 1 |
 | A file has one column and its header holds `,`, TAB or `|` | `note: ... try -d , (or -d auto)` | runs |
-| `--memory-limit` was reached | `hint: ... a filter without ORDER BY, GROUP BY or DISTINCT streams the file` | 1 |
+| `--memory-limit` was reached | `hint: ... a filter without ORDER BY, GROUP BY or DISTINCT streams the file and needs little memory` | 1 |
 
 Real outputs:
 
@@ -432,6 +441,19 @@ date,time,call,band,mode,rst_sent,rst_rcvd,freq_mhz,country
 sel: note: qso_log.csv has one column; its header holds ',': try -d , (or -d auto)
 ```
 
+The bare-condition warning is only a warning. A column of booleans is a legitimate bare condition (text such as `yes`
+and `true` is true, §6.2), and the query still runs:
+
+```
+$ printf 'call;active\nA;yes\nB;no\nC;true\nD;0\nE;1\n' | sel call where active
+sel: warning: "where active" has no comparison. If you typed > or <, the shell took it as a
+     redirection (and made a file): quote the condition, e.g. where "active > 30"
+call
+A
+C
+E
+```
+
 ### 3.5 Options
 
 | Option | Meaning | Default |
@@ -448,7 +470,7 @@ sel: note: qso_log.csv has one column; its header holds ',': try -d , (or -d aut
 | `-t, --table NAME=FILE` | load FILE as table NAME (repeatable) | — |
 | **Output** | | |
 | `-o, --output FMT` | `csv`, `tsv`, `table`, `json`, `jsonl`, `markdown` | `csv` |
-| `-D, --output-delimiter C` | output delimiter (same names as `-d`) | the input delimiter (`;` after `-r` or `-d auto`) |
+| `-D, --output-delimiter C` | output delimiter (same names as `-d`) | the input delimiter (with `-d auto`, the one detected; `;` after `-r`) |
 | `--no-output-header` | no header line | header |
 | `--null TEXT` | how NULL is written in csv, tsv, table and markdown | empty |
 | **Query** | | |
@@ -518,10 +540,10 @@ sel call, freq_mhz from qso_log.csv where "freq_mhz > 14.1" -d auto
 ```
 
 ```
-call;freq_mhz
-PY2ABC;14.205
-JA1QRZ;21.074
-EA4DEF;14.250
+call,freq_mhz
+PY2ABC,14.205
+JA1QRZ,21.074
+EA4DEF,14.250
 ```
 
 #### A regular expression as the delimiter
@@ -764,7 +786,9 @@ Exact rules of the reader (spec §5):
 - Unquoted fields end at the delimiter (a character, or the leftmost non-empty match of the regex delimiter).
 - Header names are trimmed; an empty name becomes `cN`; a repeated name gets `_2`, `_3`, ... With `--no-header` the
   names are `c1`, `c2`, ...
-- A record with more fields than the header adds columns `cN`; one with fewer leaves NULLs. Both are counted;
+- A record with more fields than the header adds columns `cN` when the file is loaded (`vdb`, a `sel` script of
+  several statements, `Database::load_csv`). When `sel` streams the file (one statement), the columns are already
+  fixed: the extra fields are ignored and a note says so. A record with fewer fields leaves NULLs. Both are counted;
   `--strict` makes them errors that name the line.
 - An unquoted empty field is NULL, a quoted empty field is the empty text (`--empty-text`: both are empty text).
 
@@ -780,7 +804,7 @@ for people; `json` and `jsonl` are for programs; `markdown` is for documents.
 |---|---|---|
 | `csv` | yes | the CSV writer above; header line unless `--no-output-header` |
 | `tsv` | yes | `csv` with TAB |
-| `table` | no (measures widths first) | a box of `+ - |`, numbers right-aligned, widths in UTF-8 characters, `(N rows)` footer |
+| `table` | no (measures widths first) | a box of `+ - |`, numbers right-aligned, widths in UTF-8 characters, line breaks and tabs shown as `\n`, `\r`, `\t`, `(N rows)` footer |
 | `json` | yes | an array of objects; a value whose text is a JSON number is written as a number, NULL as `null`, anything else as a string with escapes |
 | `jsonl` | yes | one object per line |
 | `markdown` | yes | a GitHub table; `|` in a value is escaped |
@@ -1024,9 +1048,11 @@ Davi
 Eva
 ```
 
-Exact rule (spec A9): a SELECT **without FROM** reads `_`. In `sel` and `vdb`, `_` is stdin when stdin is not a
-terminal; with a terminal it gives one row (`SELECT 1 + 1`). In a script or cron job, where stdin is not a terminal, a
-SELECT without FROM (also inside a subquery) therefore reads stdin.
+Exact rule (spec A9): a SELECT **without FROM** reads `_`. In `sel`, `_` is stdin when stdin is not a terminal; with
+a terminal it gives one row (`sel "1 + 1"`). In a script or cron job, where stdin is not a terminal, a `sel` query
+without FROM (also inside a subquery) therefore reads stdin: give it a FROM there. `vdb` never reads stdin as data by
+itself (its stdin carries SQL): a SELECT without FROM is one row, and `FROM stdin` works only with `-c` or script
+files.
 
 ### 3.10 Full SQL: `-q`, `-t`, `-f`
 
@@ -1075,10 +1101,19 @@ sel -o jsonl -- name, "-1 * length(name) as neg" from customers.csv limit 2
 
 **In plain words.** A filter (WHERE, LIMIT, a projection) over a file that is read once never loads the file: rows are
 read, tested and written one at a time, so memory stays in kilobytes whatever the file size. GROUP BY keeps one record
-per group. ORDER BY and DISTINCT must keep the rows they sort or compare. `--stats` shows what happened;
-`--memory-limit` turns "too much memory" into a clean error.
+per group, DISTINCT one entry per distinct row. ORDER BY with LIMIT keeps only the top rows; a full ORDER BY must keep
+every row it sorts. `--stats` shows what happened; `--memory-limit` turns "too much memory" into a clean error.
 
-A file with one million rows (15 MB):
+| Query shape | Memory |
+|---|---|
+| WHERE, projection, LIMIT | a few rows (streamed) |
+| GROUP BY, aggregates | one record per group |
+| DISTINCT | one entry per distinct row |
+| ORDER BY ... LIMIT n | at most 2 × (n + OFFSET) rows, or 1,024 when that is more (trimmed to n + OFFSET as it fills) |
+| ORDER BY (no LIMIT) | every projected row |
+| JOIN | the joined (right) file, hashed; the first file streams |
+
+A file with one million rows (15.8 MB):
 
 ```sh
 awk 'BEGIN{print "id;sensor;value"; for(i=1;i<=1000000;i++) printf "%d;s%d;%.2f\n", i, i%10, (i*37)%1000/10.0}' > big.csv
@@ -1088,7 +1123,7 @@ sel "count(*) as n, avg(value) as avg" from big.csv where "value > 90" --stats
 ```
 n;avg
 99000;95
-sel: 1000000 rows read, 1 rows written, memory peak 82992 bytes, 0.076 s
+sel: 1000000 rows read, 1 rows written, memory peak 82992 bytes, 0.100 s
 ```
 
 `LIMIT` stops reading as soon as it has its rows:
@@ -1116,25 +1151,39 @@ sensor;n
 s0;100000
 s1;100000
 s2;100000
-sel: 1000000 rows read, 3 rows written, memory peak 87313 bytes, 0.065 s
+sel: 1000000 rows read, 3 rows written, memory peak 87313 bytes, 0.077 s
 ```
 
-ORDER BY keeps every projected row, so a limit stops it with a hint:
+ORDER BY with LIMIT keeps only the top rows, so it fits in 1 MB:
 
 ```sh
-sel id, value from big.csv order by value desc limit 3 --memory-limit 1M --stats
+sel id, value from big.csv order by value desc, id limit 3 --memory-limit 1M --stats
 ```
 
 ```
 id;value
-sel: 24130 rows read, 0 rows written, memory peak 1048550 bytes, 0.003 s
+27;99.90
+1027;99.90
+2027;99.90
+sel: 1000000 rows read, 3 rows written, memory peak 201491 bytes, 0.487 s
+```
+
+A full ORDER BY keeps every projected row, so the limit stops it with a hint:
+
+```sh
+sel id, value from big.csv order by value desc, id --memory-limit 1M --stats
+```
+
+```
+id;value
+sel: 18794 rows read, 0 rows written, memory peak 1048555 bytes, 0.006 s
 sel: error: out of memory
 sel: hint: the --memory-limit was reached; a filter without ORDER BY, GROUP BY or DISTINCT
      streams the file and needs little memory
 ```
 
-The same query without the limit needs about 119 MB for the million rows
-(`memory peak 119044954 bytes`). Times depend on your machine; the row counts and the shape of the memory use do not.
+Without the limit, that full sort of the million rows peaks at `119044954 bytes` (about 119 MB) and takes 1.7 s on the
+machine that wrote this README. Times depend on your machine; the row counts and the shape of the memory use do not.
 
 ### 3.12 Exit codes
 
@@ -1150,7 +1199,9 @@ The same query without the limit needs about 119 MB for the million rows
 ## 4. `vdb`: the interactive shell
 
 **In plain words.** `vdb` is a SQL prompt over the same engine. Load CSV files (or name them in FROM), type SQL ending
-with `;`, and read the answer. It also runs SQL files and single commands, so it fits in scripts.
+with `;`, and read the answer. It also runs SQL files and single commands, so it fits in scripts. Unlike `sel`, `vdb`
+never streams: a file named in FROM is loaded once and stays a table (named as written, e.g. `people.csv`) for the
+next statements; `.load` names it after the file (`people`).
 
 ```
 vdb [options] [script.sql ...]   run scripts, then read SQL from stdin
@@ -1295,7 +1346,7 @@ Davi
 |---|---|
 | Sources | `c++ -std=c++11 -Isrc my_program.cpp src/vdb/*.cpp -o my_program` |
 | Static library | `make lib` → `build/libvdb.a`; then `c++ -std=c++11 -Isrc my_program.cpp build/libvdb.a -o my_program` |
-| Arduino | `#include <vdb.h>` and give the repository as a library: `arduino-cli compile --library /path/to/vDB ...` (what `make arduino_check` does); every `.cpp` under `src/` is compiled |
+| Arduino | the repository is an Arduino library (`library.properties`, `src/vdb.h`): put it in your `libraries` folder, or `arduino-cli compile --library /path/to/vDB ...` (what `make arduino_check` does); then `#include <vdb.h>` |
 
 One include gives everything: `#include <vdb.h>` (or `"vdb/vdb.hpp"`). Everything is in the namespace `vdb`.
 
@@ -1527,7 +1578,11 @@ Exact rules (spec D1, A1, §4.2):
   **never pass user input there**; pass it as a value.
 - A misuse (`gt()` without a field, `close()` without `open()`, two `field()` without an operator) makes `run()` return
   an error, for example `word chain: a comparison needs field() or expr() first`.
-- `vdb::Select q = db.select()...;` copies the chain, so a query can be built in steps.
+- Chains are values (spec A25): `vdb::Select q = db.select("name").from("people");` keeps a copy, so a query can be
+  built step by step and run later — `if (adults) q.where.field("age").ge(18);` then `q.run()`.
+- `where` follows `on`: `.join("orders", "o").on.field(...).eq(...).where.field(...)`. `in_table("_")` is the previous
+  stage of a pipeline.
+- `db.insert("log")` on a table that does not exist creates it with the columns it names (spec A21).
 
 ### 5.6 Parameters: `?` and `?N`
 
@@ -1708,14 +1763,40 @@ after 1599 more rows: out of memory
 still works: 40 readings
 ```
 
-Exact rules (spec A5, §4.3):
+A full database can always be emptied: `DELETE` without WHERE allocates nothing (spec A30). With a 64 KB budget:
+
+```cpp
+vdb::BudgetAllocator budget(vdb::heap_allocator(), 64 * 1024);
+vdb::Database db(budget);
+db.exec("CREATE TABLE t (x)");
+int n = 0;
+vdb::Status last;
+for (;; ++n) {
+    last = db.insert("t").value("x", "a reading of some length").run().status();
+    if (!last.ok()) break;
+}
+printf("%d rows, then: %s (used %zu of %zu)\n", n, last.message(), budget.used(), budget.limit());
+vdb::Status d = db.exec("DELETE FROM t");
+printf("DELETE FROM t: %s (used %zu)\n", d.ok() ? "ok" : d.message(), budget.used());
+printf("count: %s\n", db.query("SELECT COUNT(*) FROM t")[0][0].text());
+```
+
+```
+1260 rows, then: out of memory (used 60760 of 65536)
+DELETE FROM t: ok (used 16660)
+count: 0
+```
+
+Exact rules (spec A5, A30, §4.3):
 
 - Every allocation failure becomes the error `out of memory` of the statement. A statement that fails halfway keeps the
   records written before it and drops its own temporaries.
-- `malloc` appears only in `HeapAllocator`; with `-DVDB_NO_HEAP` it is compiled out (and so are `Database()`,
+- When memory is short, pools, vectors, texts and the CSV buffer fall back to the exact size they need.
+- Any other statement needs some working memory of its own (parse tree, per-row scratch), so on a nearly full database
+  a `SELECT` or a `DELETE ... WHERE` may fail with `out of memory` until memory is freed (`DELETE FROM t`,
+  `db.drop_table()`) or the budget is raised (`set_limit()`).
+- `malloc` appears only in `HeapAllocator`; with `-DVDB_NO_HEAP` it is compiled out (and so are `Database()` and
   `Params()` without an allocator).
-- A statement needs working memory of its own (parse tree, per-row scratch: `VDB_POOL_CHUNK`, `VDB_SCRATCH_CHUNK`), so
-  leave headroom in an arena beyond the records you keep.
 
 ### 5.10 Options
 
@@ -1819,6 +1900,15 @@ flowchart TD
 **Why UNKNOWN and not "false"?** UNKNOWN is SQL's own third truth value. A row is returned only when WHERE is true, and
 `NOT UNKNOWN` is still UNKNOWN — so `WHERE age > 10` and `WHERE NOT (age > 10)` both skip `N/A`. A math clause matches
 only numbers, and never silently by text. Use `IS_NUMBER(x)` to find the rows that are not numbers.
+
+**The truth of a single value** (in WHERE, AND, OR, NOT, CASE WHEN), spec A27: NULL is UNKNOWN; a number is true when
+it is not 0; a text is true when it is `true`, `yes`, `on`, `t` or `y` (any case), a numeric text is its number, and
+any other text is false. `TRUE`, `FALSE` and comparison results compare by truth, so `active = TRUE` matches `'yes'`:
+
+```
+$ vdb -o jsonl -c "SELECT 'yes' = TRUE AS a, 'on' AND 1 AS b, 'nope' = FALSE AS c"
+{"a":1,"b":1,"c":1}
+```
 
 ### 6.3 The truth table, measured
 
@@ -1931,9 +2021,10 @@ $ sel "sum(age) as total, avg(age) as average, count(age) as with_age, count(*) 
 ### 6.6 How numbers are written
 
 Integers print exactly. Reals print with up to 15 significant digits (6 on AVR, where `double` is 32-bit), without
-trailing zeros, in plain notation from 1e-5 to 1e15 and in exponent notation (`1.5e+20`) outside, with the decimal
-separator of the options. Booleans are integers: true is 1, false is 0. Stored text is never reformatted: `017` and
-`120.50` print as they were read.
+trailing zeros, in plain notation from 1e-5 up to 10^15 (10^6 on AVR) and in exponent notation (`1.5e+20`) outside,
+with the decimal separator of the options. The word chain writes reals into its SQL with the shortest text that reads
+back as the same `double` (up to 17 digits). Booleans are integers: true is 1, false is 0. Stored text is never
+reformatted: `017` and `120.50` print as they were read.
 
 ---
 
@@ -1980,11 +2071,31 @@ drop        := DROP TABLE [IF EXISTS] name
 - ORDER BY may name a select alias, an output position (`ORDER BY 2`) or any expression over the sources. GROUP BY may
   name a select alias or position too. HAVING and ORDER BY may use aggregates.
 - A SELECT without FROM reads `_` when a table `_` is in scope (the previous stage, or the default input of
-  `sel`/`vdb`); otherwise it produces one row (`SELECT 1 + 1`).
+  `sel`); otherwise it produces one row (`SELECT 1 + 1`).
 - `INSERT INTO t SELECT ...` without a column list **maps by name** (missing columns are created); with a column list,
   by position. `INSERT ... VALUES` without a list is positional over the table's columns (spec A11).
+- `INSERT` into a table that does not exist **creates it** with the columns it names (spec A21).
+- FROM and JOIN accept a path (`data/people.csv`) and a quoted text as a table name: `FROM 'people.csv'` (spec A10,
+  A22). An unknown name is offered to the table resolver (§5.10).
 - Records are not rows of a fixed schema: column types in CREATE TABLE are accepted and ignored.
 - DML results: `Result::changes()` counts the records inserted, updated or deleted; CREATE and DROP return no rows.
+
+```
+$ vdb -o table -c "INSERT INTO log (call, band) VALUES ('PY2ABC', '20m'); SELECT * FROM log"
++--------+------+
+| call   | band |
++--------+------+
+| PY2ABC | 20m  |
++--------+------+
+(1 row)
+$ vdb -o table -c "SELECT name FROM 'people.csv' WHERE city = 'Recife'"
++-------+
+| name  |
++-------+
+| Carla |
++-------+
+(1 row)
+```
 
 The LIMIT forms, over `people.csv` ordered by name (Ana, Bruno, Carla, Davi, Eva, Fábio, Gil):
 
@@ -2039,9 +2150,13 @@ text length times pattern length, never exponentially. A pattern like `(a+)+$` c
   lazy forms with a trailing `?`; escapes `\t \n \r \f \v \xHH \uHHHH` and `\` before any punctuation.
 - Matching is by UTF-8 code points, leftmost-first (Perl order).
 - Flags (a text argument): `i` case-insensitive, `m` multi-line, `s` dot-all, `1` first match only (REGEXP_REPLACE).
+- `\w`, `\b` and `[:alpha:]` include the Latin letters (code points from U+00C0, × and ÷ excluded), so `\w+` matches
+  `São` (spec A28). Other scripts match `.`, classes and literals, but not `\w`.
 - In a replacement, `\N` or `$N` (N = 0..9) inserts group N, `\\` a backslash, `$$` a dollar.
 - Not supported: back-references (`regex: back-references are not supported`), look-around and named groups
   (`regex: only (?: ) groups are supported`).
+- A pattern over `VDB_REGEX_MAX_PROGRAM` instructions, or a repeat count over 1000 (`regex: repeat count above 1000`),
+  is an error.
 
 ```
 $ vdb -o jsonl -c "SELECT REGEXP_SUBSTR('PY2ABC', '^([A-Z]+)(\d)', 1) AS prefix, REGEXP_REPLACE('a1b22c333', '\d+', '#') AS all_, REGEXP_REPLACE('a1b22c333', '\d+', '#', '1') AS first, REGEXP_COUNT('a1b22c333', '\d+') AS n, REGEXP_INSTR('abc123', '\d') AS pos, REGEXP_LIKE('Hello', '^h', 'i') AS ci, REGEXP_REPLACE('Gustavo Campos', '(\w+) (\w+)', '\2, \1') AS swapped"
@@ -2064,6 +2179,13 @@ the first (spec A13).
 Positions are 1-based and count UTF-8 characters. A function given NULL returns NULL, except the null-and-choice group,
 `CONCAT`, `CONCAT_WS`, `TYPEOF` and `IS_NUMBER`. A math function whose argument does not read as a number returns NULL;
 a domain error (`SQRT(-1)`, `LN(0)`) returns NULL. `||` with a NULL gives NULL; `CONCAT` skips it.
+`REGEXP_SUBSTR` / `REGEXP_EXTRACT` return group 0 (the whole match) unless a group is given. `LOG(x)` is base 10,
+`LN(x)` natural, `LOG(b, x)` base b. `TRIM` without characters strips spaces, tabs, CR and LF (spec A29).
+
+```
+$ vdb -o jsonl -c "SELECT LOG(100) AS lg, LN(EXP(1)) AS ln, REGEXP_SUBSTR('São Paulo', '\w+') AS w, REGEXP_SUBSTR('PY2ABC', '([A-Z]+)(\d)') AS g0"
+{"lg":2,"ln":1,"w":"São","g0":"PY2"}
+```
 
 ```
 $ vdb -o jsonl -c "SELECT UPPER('ação') AS up, LENGTH('ação') AS chars, OCTET_LENGTH('ação') AS bytes, INITCAP('são paulo') AS cap, SUBSTR('PY2ABC', 3, 1) AS region, LPAD('7', 3, '0') AS padded"
@@ -2078,8 +2200,6 @@ $ vdb -o jsonl -c "SELECT ROUND(3.14159, 2) AS r, TRUNC(-2.7) AS t, FLOOR(-2.5) 
 $ vdb -o jsonl -c "SELECT TYPEOF(NULL) AS a, TYPEOF(1) AS b, TYPEOF(1.5) AS c, TYPEOF('x') AS d, CAST('017' AS INTEGER) AS e, CAST(17 AS TEXT) = '17' AS f, COALESCE(NULL, NULL, 'third') AS g, NULLIF(5, 5) AS h, IIF(2 > 1, 'yes', 'no') AS i, GREATEST(3, 9, 4) AS j, IS_NUMBER(' 42 ') AS k, IS_NUMBER('1,5') AS l"
 {"a":"null","b":"integer","c":"real","d":"text","e":17,"f":1,"g":"third","h":null,"i":"yes","j":9,"k":1,"l":0}
 ```
-
-(These run on a terminal: in a script, give `vdb` a FROM or a terminal stdin — see the rule at the end of §3.9.)
 
 `sel --functions` (`*` = aggregate; `(n)` = number of arguments):
 
@@ -2186,7 +2306,8 @@ supported.
 
 - `(SELECT ...)` as a value: zero rows → NULL; one row → its first column; more → the error
   `a subquery used as a value returned more than one row` (spec A14).
-- `x IN (SELECT ...)`, `x IN table` (also `IN _`): the first column, NULLs following SQL's rules.
+- `x IN (SELECT ...)`, `x IN table` (also `IN _`): the first column, compared as GROUP BY compares (§6.5, spec A24),
+  so `'017'` is in a set that holds `17`; NULLs follow SQL's rules.
 - `EXISTS (SELECT ...)`.
 - A subquery may name the columns of the query around it (*correlated*); it then runs once per outer row; otherwise it
   runs once per statement and its result is kept.
@@ -2205,6 +2326,10 @@ name
 Ana
 Davi
 Fábio
+
+$ vdb -c "SELECT name FROM people.csv WHERE age IN (SELECT 17 FROM customers.csv LIMIT 1)"
+name
+Carla
 
 $ sel with br as "(select id from customers.csv where country = 'BR')" select product, price from orders.csv where "customer_id in br" -o table
 +------------+--------+
@@ -2235,13 +2360,16 @@ $ vdb -o table -c "SELECT name, (SELECT COUNT(*) FROM orders.csv o WHERE o.custo
 ### 7.10 Set operations
 
 `UNION` (distinct), `UNION ALL`, `INTERSECT`, `EXCEPT` over the same number of columns; the names come from the first
-SELECT; equality as in §6.5. A trailing ORDER BY / LIMIT applies to the whole compound.
+SELECT; equality as in §6.5. They combine **left to right with equal precedence** (as SQLite; spec A23). A trailing
+ORDER BY / LIMIT applies to the whole compound and may name result columns or positions only.
 
 | Query | Rows |
 |---|---|
 | `SELECT id FROM customers.csv INTERSECT SELECT customer_id FROM orders.csv` | 1, 2, 3 |
 | `SELECT id FROM customers.csv EXCEPT SELECT customer_id FROM orders.csv` | 4 |
 | `SELECT customer_id FROM orders.csv UNION ALL SELECT id FROM customers.csv ORDER BY 1 LIMIT 4` | 1, 1, 1, 2 |
+| `SELECT id FROM customers.csv UNION SELECT customer_id FROM orders.csv INTERSECT SELECT 1 FROM customers.csv` | 1 (the UNION first, then INTERSECT) |
+| `SELECT id FROM customers.csv UNION SELECT customer_id FROM orders.csv ORDER BY name` | `error: ORDER BY after UNION/INTERSECT/EXCEPT must name a result column: name` |
 
 ### 7.11 Pipelines
 
@@ -2294,7 +2422,10 @@ expressions. When recognized, each gives a clear error:
 
 ```
 error: not supported: window functions (OVER)
+error: not supported: NATURAL JOIN (use ON or USING)
 error: not supported: WITH RECURSIVE
+error: not supported: LATERAL
+error: not supported: CREATE INDEX, VIEW and TRIGGER
 error: not supported: ALTER
 error: regex: back-references are not supported
 ```
@@ -2333,8 +2464,8 @@ flowchart TB
 | PC (Linux, macOS) | built and tested |
 
 `double` is 32-bit on AVR: reals have about 7 digits there (printed with 6 significant digits). The MCU proof is
-compilation plus the PC run of the same code inside a small arena (`examples/pc/08_mcu_arena.cpp`); no sketch has run
-on a board yet (§12).
+compilation, `make test_small` (every unit test with the microcontroller sizes), and the PC run of the sketches'
+statements inside a small arena; no sketch has run on a board yet (§12).
 
 ### 8.2 The sketches
 
@@ -2344,7 +2475,7 @@ the result on `Serial` through an `Output`.
 - [`examples/arduino/vdb_esp32/vdb_esp32.ino`](examples/arduino/vdb_esp32/vdb_esp32.ino): a 48 KB arena; a sensor
   reading every 0.5 s; every 5 s a `GROUP BY` report as a table, then `DELETE ... WHERE ms < ?` (with `Params` in the
   arena) keeps one minute of readings, so the arena never fills.
-- [`examples/arduino/vdb_mega/vdb_mega.ino`](examples/arduino/vdb_mega/vdb_mega.ino): a 3 KB arena on the Mega's
+- [`examples/arduino/vdb_mega/vdb_mega.ino`](examples/arduino/vdb_mega/vdb_mega.ino): a 4 KB arena on the Mega's
   8 KB; six analog readings, one SQL `GROUP BY` and one word-chain query, printed as CSV, then the arena peak.
 
 The shape of both:
@@ -2352,7 +2483,7 @@ The shape of both:
 ```cpp
 #include <vdb.h>
 
-static unsigned char memory[3 * 1024];
+static unsigned char memory[4 * 1024];
 static vdb::ArenaAllocator arena(memory, sizeof(memory));
 static vdb::Database db(arena);
 
@@ -2378,6 +2509,7 @@ void loop() {}
 
 | Command | What it proves |
 |---|---|
+| `make test_small` | every unit test with the microcontroller sizes (`VDB_POOL_CHUNK` 256, `VDB_SCRATCH_CHUNK` 128, `VDB_CSV_CHUNK` 64, `VDB_MAX_DEPTH` 12, `VDB_REGEX_MAX_PROGRAM` 256), run on the PC: the small configuration is proven correct, not only compiled |
 | `make check_embedded` | every core file compiles with `-fno-exceptions -fno-rtti -nostdinc++ -DVDB_NO_HEAP -Werror`, and the objects reference no C++ runtime symbol (no `operator new/delete`, `__cxa_throw`, `__gxx_personality`, typeinfo, `std::`, `__cxa_guard`) and no `malloc`/`free`; then, when the cross compilers are installed, the core compiles for AVR (atmega2560), Xtensa (ESP32) and ARM Cortex-M4 |
 | `make arduino_check` | `arduino-cli` compiles both sketches warning-free against this library and reports flash and RAM use (logs in `build/arduino/*.log`) |
 
@@ -2391,7 +2523,7 @@ Define them before including vDB (or with `-D`) to change a limit. On AVR (`VDB_
 | `VDB_POOL_CHUNK` | bump-pool chunk for statement trees and temporaries (bytes) | 4096 | 256 |
 | `VDB_SCRATCH_CHUNK` | per-row scratch chunk (computed text of one row) | 4096 | 128 |
 | `VDB_CSV_CHUNK` | CSV reader input buffer | 65536 | 64 |
-| `VDB_MAX_DEPTH` | nesting bound for the parser, expressions and subqueries | 200 | 24 |
+| `VDB_MAX_DEPTH` | nesting bound for the parser, expressions and subqueries (each level costs stack) | 200 | 12 |
 | `VDB_REGEX_MAX_PROGRAM` | largest compiled regular expression, in instructions | 8192 | 128 |
 | `VDB_ERROR_SIZE` | room for one error message (reporting never allocates) | 256 | 72 |
 | `VDB_FLASH`, `VDB_F(text)` | put tables and messages in flash (`PROGMEM`, `PSTR`) | empty | AVR |
@@ -2445,7 +2577,7 @@ targets prove the programs, memory safety and the embedded rules.
 | `make tools` | `bin/sel` and `bin/vdb` |
 | `make test` | the unit tests (`bin/vdb_tests`; `make test FILTER=...` runs a subset), including fault injection: every allocation of a set of statements fails in turn — no crash, no leak, an `out of memory` error |
 | `make test_small` | the unit tests again, built with the microcontroller sizes (small pool, scratch and CSV chunks, AVR nesting bound) |
-| `make test_tools` | golden outputs of `sel` and `vdb` (`tests/tools/`) |
+| `make test_tools` | golden outputs of `sel` and `vdb` (`tests/tools/run.sh`): options, formats, joins of files, stdin, shell pipes, hints, exit codes, memory limits |
 | `make sanitize` | the unit tests again under AddressSanitizer and UndefinedBehaviorSanitizer |
 | `make check_embedded` | §8.3 |
 | `make arduino_check` | §8.3 (needs `arduino-cli` with the `esp32:esp32` and `arduino:avr` cores) |
@@ -2463,10 +2595,10 @@ compiler. Run on macOS (clang 21); GitHub Actions runs every target on Linux (g+
 
 | Gate | Command | Result |
 |---|---|---|
-| unit tests | `make test` | 93 of 93 |
-| unit tests, microcontroller sizes | `make test_small` | 93 of 93 |
-| program tests | `make test_tools` | 31 of 31 golden outputs (options, formats, joins of files, stdin, shell pipes, hints, exit codes, memory limits) |
-| sanitizers | `make sanitize` | 93 of 93 under AddressSanitizer + UndefinedBehaviorSanitizer, no report |
+| unit tests | `make test` | 97 of 97 |
+| unit tests, microcontroller sizes | `make test_small` | 97 of 97 |
+| program tests | `make test_tools` | 41 of 41 golden outputs (options, formats, joins of files, stdin, shell pipes, hints, exit codes, memory limits) |
+| sanitizers | `make sanitize` | 97 of 97 under AddressSanitizer + UndefinedBehaviorSanitizer, no report |
 | fault injection | `make test` | every allocation of a 9-statement script (joins, groups, pipelines, regex, subqueries, DML) failed in turn: each run an `out of memory` error, 0 blocks leaked |
 | random input | `make test` | 3,000 random SQL token soups and 2,000 random CSV byte strings: no crash |
 | examples | `make examples_run` | 9 of 9 |
@@ -2510,6 +2642,8 @@ The full table, with structure sizes on AVR against a PC, is in [`spec.md` §10.
 | `examples/data/` | the CSV files the examples, this README and the tests use |
 | `tests/` | the unit test harness and tests; `tests/tools/` the program tests |
 | `Makefile` | every target of §10 |
+| `library.properties` | the Arduino library description |
+| `.github/workflows/ci.yml` | continuous integration (§10) |
 | `spec.md` | the normative specification |
 
 ---
@@ -2523,7 +2657,7 @@ The full table, with structure sizes on AVR against a PC, is in [`spec.md` §10.
 | L3 | No sketch has run on a board yet; the MCU proof is compilation, `make test_small`, and the PC run of the Mega sketch's statements with the AVR sizes. The Mega's 4 KB arena is an estimate from structure sizes. |
 | L4 | `table` output buffers the whole result to measure widths. |
 | L5 | A full ORDER BY (no LIMIT) holds every projected row plus 32 bytes per sort key per row (113 MB for 1M rows). With LIMIT n only about 2 × (n + OFFSET) rows are held (195 KB for the same file). |
-| L6 | A stream (stdin, or a file `sel` streams) is read once: a second statement of the same script cannot read it again. |
+| L6 | A stream (stdin, or a file `sel` streams) is read once: a later statement that reads it again gets an error that says so, never an empty table. A subquery never streams (it may run once per outer row). |
 | L7 | `\w` and case folding cover Latin scripts; other scripts match `.`, classes and literals but not `\w` or ILIKE folding. |
 
 Also by design (§7.12): no window functions, recursive WITH, dates and times, indexes, constraints, transactions,

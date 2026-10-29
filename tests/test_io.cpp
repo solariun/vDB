@@ -471,3 +471,48 @@ TEST(order_by_limit_matches_a_full_sort_with_ties) {
     test::Rows full_desc(db, "SELECT i FROM (SELECT * FROM t ORDER BY k DESC, i) AS s LIMIT 5 OFFSET 2000");
     CHECK_STR(test::Rows(db, "SELECT i FROM t ORDER BY k DESC LIMIT 5 OFFSET 2000").c_str(), full_desc.c_str());
 }
+
+TEST(streaming_never_inside_a_subquery) {
+    // A correlated subquery runs once per outer row: its table must be loaded, not streamed (found by the README run).
+    vdb::Database db;
+    vdb::TextSource customers_text("id;name\n1;Ana\n2;Davi\n3;Eva\n4;Zoe\n");
+    vdb::TextSource orders_text("id;customer_id\n100;1\n101;1\n102;2\n103;3\n104;3\n");
+    vdb::CsvReader customers(db.allocator(), customers_text, vdb::CsvOptions());
+    vdb::CsvReader orders(db.allocator(), orders_text, vdb::CsvOptions());
+    CHECK(customers.open().ok() && orders.open().ok());
+    db.attach_csv("customers", customers);
+    db.attach_csv("orders", orders);
+    CHECK_ROWS(db, "SELECT name, (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id) FROM customers c",
+               "Ana|2;Davi|1;Eva|2;Zoe|0");
+    // customers was streamed: a second statement is told so, never given an empty table.
+    CHECK_ROWS(db, "SELECT COUNT(*) FROM customers",
+               "ERROR: table customers was streamed by an earlier statement and has no rows left (attach it again, or set "
+               "options().streaming = false to keep streamed tables)");
+    vdb::Database again;
+    vdb::TextSource customers_again("id;name\n1;Ana\n2;Davi\n3;Eva\n4;Zoe\n");
+    vdb::TextSource orders_again("id;customer_id\n100;1\n101;1\n102;2\n103;3\n104;3\n");
+    vdb::CsvReader c2(again.allocator(), customers_again, vdb::CsvOptions());
+    vdb::CsvReader o2(again.allocator(), orders_again, vdb::CsvOptions());
+    CHECK(c2.open().ok() && o2.open().ok());
+    again.attach_csv("customers", c2);
+    again.attach_csv("orders", o2);
+    CHECK_ROWS(again, "SELECT name FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)", "Zoe");
+}
+
+TEST(loaded_stream_keeps_extra_fields_as_columns) {
+    vdb::Database db;
+    vdb::TextSource text("a;b\n1;2\n3;4;5\n");
+    vdb::CsvReader reader(db.allocator(), text, vdb::CsvOptions());
+    reader.open();
+    db.attach_csv("t", reader);
+    vdb::Status st;
+    CHECK(db.table("t")->load_stream(st));
+    CHECK_ROWS(db, "SELECT a, b, c3 FROM t", "1|2|NULL;3|4|5");
+}
+
+TEST(formats_table_shows_line_breaks_escaped) {
+    vdb::Database db;
+    vdb::Text out(vdb::heap_allocator());
+    CHECK_STR(format(db, "SELECT 'a' || CHAR(10) || 'b' || CHAR(9) || 'c' AS t", vdb::k_format_table, out),
+              "+---------+\n| t       |\n+---------+\n| a\\nb\\tc |\n+---------+\n(1 row)\n");
+}

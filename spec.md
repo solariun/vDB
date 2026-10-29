@@ -12,8 +12,8 @@ a text match reads text, in the same WHERE.
 On top of the library sit two programs: **`sel`**, which makes a SELECT typed on the command line run over CSV files
 (`sel name, age from people.csv where "age > 30"`), and **`vdb`**, an interactive SQL shell.
 
-**Status (2026-10-29): v1.0 specified, built and tested** (§10 gives the numbers): 93 unit tests, the same 93 with the
-microcontroller sizes, 31 program tests, the unit tests under AddressSanitizer and UndefinedBehaviorSanitizer, every
+**Status (2026-10-29): v1.0 specified, built and tested** (§10 gives the numbers): 97 unit tests, the same 97 with the
+microcontroller sizes, 41 program tests, the unit tests under AddressSanitizer and UndefinedBehaviorSanitizer, every
 allocation of a test script failed in turn without a crash or a leak, 9 PC examples, the core compiled for the ESP32
 (GCC 14) and the ATmega2560 (avr-gcc 7.3) with `-Werror`, both Arduino sketches compiled warning-free. Run on macOS
 (clang 21); CI runs the same on Linux (GCC) and macOS. Not yet run on a board (§11 L3).
@@ -30,6 +30,7 @@ Development). Where this file and the code disagree, the disagreement is a defec
 | 2026-10-29 | v1.0 specified with Gustavo's decisions D1–D5 (§0.2) and the design decisions A1–A20 (§0.3): flexible values, SQL with JOINs and pipelines, the word-chain API, the `sel` and `vdb` programs, the allocator model for MCUs. |
 | 2026-10-29 | Gustavo, while it was being built: the CSV program is `sel`, written like a SELECT on the command line (D5; `select` is a reserved word of bash, zsh and sh, tested). |
 | 2026-10-29 | v1.0 built: core library (13 files), `sel` and `vdb`, 9 PC examples, 2 Arduino sketches, 93 unit tests, 31 program tests, sanitizer, fault-injection, small-size and embedded runs, CI, README. Decisions A21–A32 taken while building (§0.3). Measured in §10.1. |
+| 2026-10-29 | **Discrepancies found by running every README command** (the README was written from real runs) and fixed: (1) a correlated subquery or EXISTS over a CSV file in `sel` streamed the inner file, which it then lacked from the second outer row on (wrong counts): nothing streams inside a subquery now; (2) a loaded stream now turns extra fields into columns `cN` (§5), as `load_csv` did; (3) a script piped into `vdb` with a SELECT without FROM read the rest of the script as CSV: `vdb` never reads stdin as data by itself (A9); (4) `sel "SELECT ..."` (one quoted word) added a second SELECT; (5) `-d auto` wrote `;`: the output uses the detected delimiter (§7.1); (6) the "quote your value" hint fired after `,` and `(`: only after a comparison, LIKE-like words or `IN (`; (7) error texts in §7.3 and §9 now quote the code; (8) `NATURAL JOIN` was taken as an alias and `ROW_NUMBER() OVER` as an unknown function: both say "not supported" (§3.12); (9) line breaks broke the `table` box: shown as `\n` (§6). A table that was streamed and is read again is an error, never an empty table (L6). 97 unit tests, 41 program tests. |
 | 2026-10-29 | ORDER BY with LIMIT keeps only the top rows (L5): sorted and trimmed when the buffer doubles, stable; 1M rows with LIMIT 3: 113 MB → 195 KB, 1.27 → 0.41 s. Tests `streaming_order_by_limit_keeps_only_the_top_rows` and `order_by_limit_matches_a_full_sort_with_ties`. |
 | 2026-10-29 | Found by the tests and fixed before release: the regex search stopped at the first position where a leading assertion (`\b`, `^` with `m`) failed; `POSITION(x IN y)`; 17-digit reals that did not read back exactly; `1e-300` overflowed the scaling; the group key buffer was 4 bytes on AVR for an 8-byte integer (found by avr-gcc); a full arena could not run `DELETE`; indexing a failed `Result` crashed; `FROM 'file.csv'` was refused; `vdb::Select q = db.select()...;` did not compile. |
 
@@ -82,7 +83,7 @@ so a filter over a large CSV file never holds the file in memory.
 | A6 | **Regular expressions run on a Pike VM** (Thompson NFA with priorities and captures): time is O(text × pattern), never exponential. Pattern size is limited (`VDB_REGEX_MAX_PROGRAM`). | Safety: a pattern like `(a+)+$` cannot hang the program, on a PC or an MCU. | Backtracking with a step limit: still slow on the worst case and fails unpredictably. |
 | A7 | **The executor is push-based:** a source pushes rows through JOIN, WHERE, grouping, projection, DISTINCT, ORDER BY and LIMIT into a sink; a stage of a pipeline is the sink of the stage before it; a satisfied LIMIT stops the source; ORDER BY with LIMIT keeps only the top rows (L5). A CSV table that is read once is **streamed** (never loaded) when it drives the first FROM item. | A filter over a 10 GB CSV uses kilobytes; `LIMIT 10` reads 10 rows; GROUP BY holds one record per group, ORDER BY only the projected rows. | Materialize everything: simple, but memory grows with the file. |
 | A8 | **Names are case-insensitive** (ASCII), quoted or not. Duplicate output names get `_2`, `_3`, ... so a later stage can name every column. | CSV headers come in any case; SQL users expect `Name` = `name`. | Case-sensitive quoted names (standard): surprising with CSV headers. |
-| A9 | **A SELECT without FROM reads `_`** when a table `_` is in scope (the previous pipeline stage, or the default input of `sel`/`vdb`); otherwise it produces one row (`SELECT 1 + 1`). | `sel "count(*)" < data.csv` and `|> SELECT name` read naturally. | Requiring FROM everywhere: noisy in pipelines. |
+| A9 | **A SELECT without FROM reads `_`** when a table `_` is in scope (the previous pipeline stage, or stdin in `sel` when it is not a terminal); otherwise it produces one row (`SELECT 1 + 1`). `vdb` never makes stdin `_`: its stdin carries SQL. | `sel "count(*)" < data.csv` and `|> SELECT name` read naturally. | Requiring FROM everywhere: noisy in pipelines. |
 | A10 | **Table names in FROM/JOIN may be paths:** adjacent tokens with no space between them (`data/people.csv`, `../x.csv`, `~/a.csv`) form one name; `"my file.csv"` quotes one. An unknown name is offered to the database's **table resolver** (the programs load CSV files with it). The default alias of a path is its file name without extension (`people`). | `sel * from data/people.csv` must work; the library itself never opens files (MCUs have none). | A separate `--table` option for every file: noisy; it still exists (`-t name=file`). |
 | A11 | `INSERT INTO t SELECT ...` **without a column list maps by name** (missing columns are created); with a column list, by position. `INSERT ... VALUES` without a list is positional over the table's columns. | Records are not rows of a fixed schema; matching by name never puts a value in the wrong field. | Positional always (standard): silently swaps fields when the orders differ. |
 | A12 | `LIKE` is case-sensitive (standard), `ILIKE` is not; case folding covers ASCII and Latin-1 letters in UTF-8 (`Ç` ↔ `ç`, `Á` ↔ `á`). Text functions count UTF-8 characters, not bytes. | Portuguese and other Latin languages in real CSV files. | ASCII only: `UPPER('ação')` would give `AçãO`. |
@@ -489,8 +490,9 @@ Exact rules (reader):
 - Unquoted fields end at the delimiter (a character, or the leftmost non-empty match of the regex delimiter).
 - Header names are trimmed of spaces; an empty name becomes `cN` (N = position from 1); a repeated name gets `_2`,
   `_3`, ... With `--no-header` the names are `c1`, `c2`, ...
-- A record with more fields than the header adds columns `cN`; one with fewer leaves NULLs. Both are counted;
-  `--strict` makes them errors that name the line.
+- A record with more fields than the header adds columns `cN` when the table is loaded; when it is streamed (A7) the
+  columns are already bound and the extra fields are ignored (`sel` notes it). One with fewer leaves NULLs. Both are
+  counted; `--strict` makes them errors that name the line.
 - Empty lines are skipped. Empty fields follow A4. `--trim` strips spaces around unquoted fields.
 
 Exact rules (writer): fields holding the delimiter, the quote, CR or LF, or starting or ending with a space, are quoted;
@@ -504,7 +506,7 @@ NULL is written empty, the empty text as `""`; lines end with LF.
 |---|---|---|
 | `csv` | yes | §5 writer; header line unless disabled |
 | `tsv` | yes | `csv` with TAB |
-| `table` | no (widths) | box of `+ - |`, numbers right-aligned, widths in UTF-8 characters, `(N rows)` footer |
+| `table` | no (widths) | box of `+ - |`, numbers right-aligned, widths in UTF-8 characters, line breaks and tabs shown as `\n` `\r` `\t`, `(N rows)` footer |
 | `json` | yes | an array of objects; a value whose text is a JSON number is written as a number, NULL as `null`, everything else as a string with escapes |
 | `jsonl` | yes | one object per line |
 | `markdown` | yes | a GitHub table; `|` escaped |
@@ -536,7 +538,7 @@ sel -q "UPDATE people SET age = age + 1; SELECT * FROM people" -t people=people.
 |---|---|
 | `-d, --delimiter C` | input delimiter: one character, or `tab`, `comma`, `semicolon`, `colon`, `pipe`, `space`, `auto` (default `;`) |
 | `-r, --regex-delimiter RE` | split fields with a regular expression |
-| `-D, --output-delimiter C` | output delimiter (default: the input delimiter, or `;` after a regex) |
+| `-D, --output-delimiter C` | output delimiter (default: the input delimiter, the detected one with `auto`, or `;` after a regex) |
 | `-o, --output FMT` | `csv` (default), `tsv`, `table`, `json`, `jsonl`, `markdown` |
 | `-t, --table NAME=FILE` | load a file as table NAME (repeatable) |
 | `-q, --query SQL` | run full SQL statements instead of the select words |
@@ -582,11 +584,13 @@ Quoting the whole query always works: `sel "name, age from people.csv where age 
 - On an unknown column after `|>`: a stage sees only the columns the stage before it selected.
 
 - When the words before FROM are exactly the names of the files in the current folder, `sel` stops: "the shell
-  replaced * with file names: write "*"" (exit 2).
+  replaced * with the names of the files in this folder. Quote it: sel "*" from ..." (exit 2).
 - When WHERE or HAVING is a bare name (`where age`), `sel` warns on stderr that a `>` or `<` may have become a
   redirection.
-- When a name is not a column and looks like a value, the error adds: "if Ana is a text value, quote it so the shell
-  keeps the quotes: "name = 'Ana'"".
+- When a name that is not a column follows a comparison (`= < >`), LIKE, ILIKE, GLOB, REGEXP or `IN (`, the error
+  adds: "if Ana is a text value, quote it so the shell keeps the quotes: "... = 'Ana'"".
+- The query text may start with SELECT or WITH itself (`sel "SELECT name FROM people.csv"`); otherwise `sel` puts
+  SELECT in front.
 
 ### 7.4 `vdb` — the interactive shell
 
@@ -620,7 +624,7 @@ Statements end with `;`. Dot commands: `.help`, `.tables`, `.schema [table]`, `.
 
 - No function of the library throws, aborts or prints. Every failure is a `Status` / `Result` with a message:
   syntax errors with `line:column` and the token, name errors with a hint (A20), runtime errors (`out of memory`,
-  `scalar subquery returned more than one row`, `regex: ...`, `csv line N: ...`).
+  `a subquery used as a value returned more than one row`, `regex: ...`, `csv line N: ...`).
 - Nesting is bounded (`VDB_MAX_DEPTH`): deep parentheses or subqueries are an error, never a stack overflow.
 - Regular expressions are linear-time (A6). LIKE and GLOB are matched without exponential backtracking.
 - A script is parsed completely before its first statement runs: a syntax error changes nothing.
@@ -632,10 +636,10 @@ Statements end with `;`. Dot commands: `.help`, `.tables`, `.schema [table]`, `.
 
 | Gate | Command | Result (2026-10-29) |
 |---|---|---|
-| unit tests | `make test` | 93 of 93 |
-| unit tests, microcontroller sizes | `make test_small` | 93 of 93 |
-| program tests | `make test_tools` | 31 of 31 golden outputs of `sel` and `vdb` (options, formats, joins of files, stdin, shell pipes, hints, exit codes, memory limits) |
-| sanitizers | `make sanitize` | 93 of 93 under ASan + UBSan, no report |
+| unit tests | `make test` | 97 of 97 |
+| unit tests, microcontroller sizes | `make test_small` | 97 of 97 |
+| program tests | `make test_tools` | 41 of 41 golden outputs of `sel` and `vdb` (options, formats, joins of files, stdin, shell pipes, hints, exit codes, memory limits) |
+| sanitizers | `make sanitize` | 97 of 97 under ASan + UBSan, no report |
 | fault injection | `make test` (`safety_every_allocation_failure_is_an_error_and_leaks_nothing`) | each allocation of a 9-statement script (joins, groups, pipelines, regex, subqueries, DML) failed in turn: every run an `out of memory` error, 0 blocks leaked |
 | random input | `make test` | 3,000 random SQL token soups and 2,000 random CSV byte strings: no crash |
 | examples | `make examples_run` | 9 of 9 |
@@ -674,7 +678,7 @@ scaled by the structure sizes, about 3–3.5 KB on AVR (*estimate*: L3).
 | L3 | No sketch has run on a board yet; the MCU proof is compilation, `make test_small`, and the PC run of the Mega sketch's statements with the AVR sizes. The Mega's 4 KB arena is an estimate from structure sizes. |
 | L4 | `table` output buffers the whole result to measure widths. |
 | L5 | A full ORDER BY (no LIMIT) holds every projected row plus 32 bytes (16 on AVR) per sort key per row (113 MB for 1M rows, §10.1). With LIMIT n the buffer is sorted and trimmed to n + OFFSET rows whenever it doubles (at least 1,024 rows): 195 KB for the same file. |
-| L6 | A stream (stdin, or a file `sel` streams) is read once: a second statement of the same script cannot read it again (A31). |
+| L6 | A stream (stdin, or a file `sel` streams) is read once: a later statement that reads it again gets the error "table X was streamed by an earlier statement and has no rows left", never an empty table (A31). Nothing streams inside a subquery. |
 | L7 | `\w` and case folding cover Latin scripts; other scripts match `.`, classes and literals but not `\w` or ILIKE folding. |
 
 ---

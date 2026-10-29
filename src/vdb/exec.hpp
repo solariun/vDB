@@ -89,6 +89,7 @@ private:
     size_t changes_;
     char decimal_;
     int depth_;
+    int subquery_depth_;  // inside a subquery nothing streams: it may run once per outer row
     Vec<Table*> owned_tables_;
     Vec<HashIndex*> owned_indexes_;
     Vec<const char*> names_;

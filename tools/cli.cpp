@@ -213,6 +213,11 @@ bool ends_with(const char* s, const char* tail) {
 vdb::Table* Files::open(const char* name, const char* path, vdb::Status& status) {
     FILE* file = 0;
     bool from_stdin = is_stdin_name(path);
+    if (from_stdin && strcmp(path, "_") == 0 && !settings_.implicit_stdin) return 0;  // vdb: no implicit stdin
+    if (from_stdin && settings_.stdin_is_sql) {
+        status.fail(vdb::k_error_io, VDB_F("stdin carries the SQL here: name a file in FROM, or use vdb -c"));
+        return 0;
+    }
     if (from_stdin) {
         if (stdin_is_terminal()) {
             if (strcmp(path, "_") == 0) return 0;  // no input: SELECT without FROM gives one row
@@ -306,6 +311,33 @@ void Files::install() {
     db_.options().resolver_user = this;
 }
 
+char Files::detected_delimiter() const {
+    if (!settings_.csv.auto_delimiter) return 0;
+    return entries_.size() ? entries_[0].reader->delimiter() : 0;
+}
+
+Printer::Printer(vdb::Output& out, Settings& settings, Files& files)
+    : out_(out), settings_(settings), files_(files), formatter_(0), rows_(0) {}
+
+Printer::~Printer() {
+    if (formatter_) vdb::destroy(vdb::heap_allocator(), formatter_);
+}
+
+bool Printer::begin(size_t columns, const char* const* names) {
+    // Called after the statement's files are open: the detected delimiter is known now.
+    vdb::FormatOptions options = settings_.format;
+    char found = files_.detected_delimiter();
+    if (!settings_.output_delimiter_given && found) options.delimiter = found;
+    if (formatter_) {
+        rows_ += formatter_->rows();
+        vdb::destroy(vdb::heap_allocator(), formatter_);
+    }
+    void* m = vdb::heap_allocator().allocate(sizeof(vdb::Formatter));
+    if (!m) return false;
+    formatter_ = new (m, vdb::PlaceTag()) vdb::Formatter(out_, options, vdb::heap_allocator());
+    return formatter_->begin(columns, names);
+}
+
 size_t Files::rows_read() const {
     size_t n = 0;
     for (size_t i = 0; i < entries_.size(); ++i) n += entries_[i].reader->records();
@@ -323,8 +355,13 @@ void Files::report_notes() {
                     program_, shown, r.short_rows());
         }
         if (r.long_rows()) {
-            fprintf(stderr, "%s: note: %s: %zu rows with more fields than the header (extra fields ignored; --strict stops)\n",
-                    program_, shown, r.long_rows());
+            vdb::Table* t = db_.table(e.name);
+            bool columns_added = t && t->column_count() > r.column_count();
+            fprintf(stderr, columns_added
+                                ? "%s: note: %s: %zu rows with more fields than the header (the extra fields became columns c%zu, ...)\n"
+                                : "%s: note: %s: %zu rows with more fields than the header; the file was streamed, so the\n"
+                                  "     extra fields were ignored (vdb loads files and keeps them as columns c%zu, ...; --strict stops)\n",
+                    program_, shown, r.long_rows(), r.column_count() + 1);
         }
         if (!settings_.delimiter_given && r.column_count() == 1) {
             const char* only = r.column_name(0);

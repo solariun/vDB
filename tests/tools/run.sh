@@ -216,5 +216,64 @@ check shell_error_exit 1 "$VDB" -c "SELECT * FROM nowhere" <<'EOF'
 error: no such table: nowhere
 EOF
 
+check correlated_subquery_over_files 0 "$SEL" "name, (select count(*) from orders.csv o where o.customer_id = c.id) as n from customers.csv c" <<'EOF'
+name;n
+Ana;2
+Davi;1
+Eva;2
+Zoe;0
+EOF
+
+check exists_over_files 0 "$SEL" "name from customers.csv c where not exists (select 1 from orders.csv o where o.customer_id = c.id)" <<'EOF'
+name
+Zoe
+EOF
+
+check quoted_full_select 0 "$SEL" "SELECT name FROM people.csv LIMIT 2" <<'EOF'
+name
+Ana
+Bruno
+EOF
+
+check auto_delimiter_output 0 "$SEL" call, band from qso_log.csv limit 1 -d auto <<'EOF'
+call,band
+PY2ABC,20m
+EOF
+
+check no_value_hint_for_a_column_list 1 "$SEL" "name, c3" from customers.csv <<'EOF'
+sel: error: no such column: c3 (did you mean id?)
+EOF
+
+check value_hint_in_list 1 "$SEL" name from customers.csv where "name in (Ana, 'Eva')" <<'EOF'
+sel: error: no such column: Ana
+sel: hint: if Ana is a text value, quote it so the shell keeps the quotes: "... = 'Ana'"
+EOF
+
+check long_rows_loaded_as_columns 0 sh -c "printf 'a;b\n1;2\n3;4;5\n' > /tmp/vdb_long_\$\$.csv; '$VDB' -o csv -c \"SELECT * FROM '/tmp/vdb_long_\$\$.csv'\" 2>&1 | grep -v note; rm -f /tmp/vdb_long_\$\$.csv" <<'EOF'
+a;b;c3
+1;2;
+3;4;5
+EOF
+
+check shell_script_without_from 0 sh -c "printf 'SELECT 1 + 1 AS two;\nSELECT name FROM customers.csv LIMIT 1;\n' | '$VDB'" <<'EOF'
+two
+2
+name
+Ana
+EOF
+
+check shell_stdin_is_sql 1 sh -c "printf 'SELECT * FROM stdin;\n' | '$VDB'" <<'EOF'
+error: stdin carries the SQL here: name a file in FROM, or use vdb -c
+EOF
+
+check table_escapes_line_breaks 0 "$VDB" -o table -c "SELECT 'a' || CHAR(10) || 'b' AS t" <<'EOF'
++------+
+| t    |
++------+
+| a\nb |
++------+
+(1 row)
+EOF
+
 echo "tools: $passed passed, $failed failed"
 [ "$failed" = 0 ]

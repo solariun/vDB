@@ -77,7 +77,7 @@ bool record_field(const uint8_t* record, size_t index, Value& out) {
 // ── Table ────────────────────────────────────────────────────────────────────
 
 Table::Table(Allocator& allocator, const char* name, size_t name_length)
-    : allocator_(&allocator), name_(0), columns_(allocator), records_(allocator), stream_(0), stream_done_(false) {
+    : allocator_(&allocator), name_(0), columns_(allocator), records_(allocator), stream_(0), stream_done_(false), streamed_(false) {
     name_ = static_cast<char*>(allocator.allocate(name_length + 1));
     if (name_) {
         memcpy(name_, name, name_length);
@@ -160,7 +160,16 @@ bool Table::load_stream(Status& status) {
             stream_done_ = true;
             break;
         }
-        if (count > columns_.size()) count = columns_.size();
+        while (count > columns_.size()) {
+            // More fields than the header: new columns cN, as load_csv does (spec 5).
+            Text name(*allocator_);
+            name.append_char('c');
+            name.append_int(static_cast<int64_t>(columns_.size() + 1));
+            if (!name.ok() || ensure_column(name.c_str(), name.size()) < 0) {
+                status.fail_memory();
+                return false;
+            }
+        }
         if (!append_values(values, count)) {
             status.fail_memory();
             return false;

@@ -436,6 +436,7 @@ Executor::Executor(Database& db, Pool& statement_pool, const char* sql, const Va
       changes_(0),
       decimal_(db.options().decimal_separator),
       depth_(0),
+      subquery_depth_(0),
       owned_tables_(db.allocator()),
       owned_indexes_(db.allocator()),
       names_(db.allocator()) {}
@@ -547,8 +548,15 @@ Table* Executor::resolve_table(const char* name, Scope* scope, bool driving, boo
         if (!status.ok()) return 0;
     }
     if (!t) return 0;
+    if (t->streamed()) {
+        status.fail(k_error_misuse,
+                    VDB_F("table %s was streamed by an earlier statement and has no rows left (attach it again, or set "
+                          "options().streaming = false to keep streamed tables)"),
+                    t->name());
+        return 0;
+    }
     if (t->stream_pending()) {
-        if (driving && db_.options().streaming && occurrences(t->name()) <= 1) {
+        if (driving && subquery_depth_ == 0 && db_.options().streaming && occurrences(t->name()) <= 1) {
             stream = true;
         } else if (!t->load_stream(status)) {
             return 0;
@@ -801,7 +809,10 @@ bool Executor::eval_in(Expr* e, Frame* frame, Value& out) {
             }
         } else {
             SubquerySink sink(*this, SubquerySink::set, index);
-            if (run_query(e->query, frame->run ? frame->run->scope() : 0, frame, e, &sink) == k_error) return false;
+            ++subquery_depth_;
+            int rc = run_query(e->query, frame->run ? frame->run->scope() : 0, frame, e, &sink);
+            --subquery_depth_;
+            if (rc == k_error) return false;
             has_null = sink.has_null();
         }
         if (e->kind == e_in_table || !e->correlated) {
@@ -831,7 +842,10 @@ bool Executor::eval_subquery(Expr* e, Frame* frame, Value& out) {
     }
     Scope* scope = frame && frame->run ? frame->run->scope() : 0;
     SubquerySink sink(*this, e->kind == e_exists ? SubquerySink::exists : SubquerySink::scalar, 0);
-    if (run_query(e->query, scope, frame, e, &sink) == k_error) return false;
+    ++subquery_depth_;
+    int rc = run_query(e->query, scope, frame, e, &sink);
+    --subquery_depth_;
+    if (rc == k_error) return false;
     if (e->kind == e_exists) out = Value::boolean(sink.rows() > 0);
     else out = sink.rows() ? sink.value() : Value::null();
     // The sink's text dies with it: keep a copy for the caller (or the cache).
@@ -1613,7 +1627,6 @@ int CoreRun::drive() {
             int got = stream->next(values, count, ex_.status());
             if (got < 0) return k_error;
             if (got == 0) {
-                first.table->set_stream_done();
                 break;
             }
             for (size_t i = 0; i < first.width; ++i) first.row[i] = i < count ? values[i] : Value::null();
@@ -1633,6 +1646,7 @@ int CoreRun::drive() {
             if (rc != k_go) break;
         }
     }
+    if (first.streaming) first.table->set_streamed();  // read to the end, or stopped early: either way it is spent
     if (rc == k_error) return rc;
     if (rc == k_go) {
         for (size_t k = 1; k < sources_.size(); ++k) {

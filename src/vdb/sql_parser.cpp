@@ -1294,6 +1294,7 @@ private:
         size_t n = tok_.end - tok_.start;
         Function f = find_function(s, n);
         if (f == fn_none && names_equal(s, n, "POSITION")) f = fn_INSTR;  // POSITION(x IN y), handled below
+        if (f == fn_none && followed_by_over()) return unsupported(VDB_F("window functions (OVER)"));
         if (f == fn_none) {
             const int k_shown = 32;
             const char* name = pool_.copy(s, n);
@@ -1395,6 +1396,24 @@ private:
             }
         }
         return e;
+    }
+
+    // name ( ... ) OVER: skips the balanced arguments after the current name.
+    bool followed_by_over() {
+        Token t;
+        lex(tok_.end, t);
+        if (!(t.kind == t_op && t.op == o_lparen)) return false;
+        int depth = 0;
+        for (size_t at = t.start;;) {
+            lex(at, t);
+            if (t.kind == t_end) return false;
+            if (t.kind == t_op && t.op == o_lparen) ++depth;
+            if (t.kind == t_op && t.op == o_rparen && --depth == 0) {
+                lex(t.end, t);
+                return t.kind == t_name && t.keyword == kw_OVER;
+            }
+            at = t.end;
+        }
     }
 
     bool peek_from() {

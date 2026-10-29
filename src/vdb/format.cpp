@@ -268,16 +268,6 @@ void Formatter::print_table() {
         ok_ = false;
         return;
     }
-    size_t null_width = utf8_count(options_.null_text, strlen(options_.null_text));
-    for (size_t c = 0; c < columns; ++c) widths[c] = utf8_count(names_[c], strlen(names_[c]));
-    for (size_t r = 0; r < buffer_->row_count(); ++r) {
-        for (size_t c = 0; c < columns; ++c) {
-            Value v;
-            record_field(buffer_->record(r), c, v);
-            size_t w = v.is_null() ? null_width : utf8_count(v.s, v.n);
-            if (w > widths[c]) widths[c] = w;
-        }
-    }
     Output& o = out_;
     struct Line {
         static void rule(Output& out, const Vec<size_t>& w, size_t columns) {
@@ -288,19 +278,46 @@ void Formatter::print_table() {
             }
             out.write("\n", 1);
         }
-        static void cell(Output& out, const char* s, size_t n, size_t width, bool right) {
+        // Line breaks and tabs would break the box: they show as \\n, \\r and \\t.
+        static size_t shown_width(const char* s, size_t n) {
             size_t w = utf8_count(s, n);
+            for (size_t i = 0; i < n; ++i) w += (s[i] == '\n' || s[i] == '\r' || s[i] == '\t') ? 1 : 0;
+            return w;
+        }
+        static void text(Output& out, const char* s, size_t n) {
+            size_t start = 0;
+            for (size_t i = 0; i < n; ++i) {
+                const char* escape = s[i] == '\n' ? "\\n" : s[i] == '\r' ? "\\r" : s[i] == '\t' ? "\\t" : 0;
+                if (!escape) continue;
+                out.write(s + start, i - start);
+                out.write(escape, 2);
+                start = i + 1;
+            }
+            out.write(s + start, n - start);
+        }
+        static void cell(Output& out, const char* s, size_t n, size_t width, bool right) {
+            size_t w = shown_width(s, n);
             out.write(" ", 1);
             if (right) {
                 for (size_t i = w; i < width; ++i) out.write(" ", 1);
             }
-            out.write(s, n);
+            text(out, s, n);
             if (!right) {
                 for (size_t i = w; i < width; ++i) out.write(" ", 1);
             }
             out.write(" |", 2);
         }
     };
+    size_t null_width = utf8_count(options_.null_text, strlen(options_.null_text));
+    for (size_t c = 0; c < columns; ++c) widths[c] = Line::shown_width(names_[c], strlen(names_[c]));
+    for (size_t r = 0; r < buffer_->row_count(); ++r) {
+        for (size_t c = 0; c < columns; ++c) {
+            Value v;
+            record_field(buffer_->record(r), c, v);
+            size_t w = v.is_null() ? null_width : Line::shown_width(v.s, v.n);
+            if (w > widths[c]) widths[c] = w;
+        }
+    }
     Line::rule(o, widths, columns);
     if (options_.header) {
         o.write("|", 1);

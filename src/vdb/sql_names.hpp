@@ -15,7 +15,7 @@ namespace vdb {
     X(NULL, 1) X(OFFSET, 1) X(ON, 1) X(OR, 1) X(ORDER, 1) X(OUTER, 1) X(REGEXP, 1) X(RIGHT, 1) X(RLIKE, 1)            \
     X(SELECT, 1) X(SET, 1) X(SIMILAR, 1) X(TABLE, 1) X(THEN, 1) X(TRUE, 1) X(UNION, 1) X(UPDATE, 1) X(USING, 1)      \
     X(VALUES, 1) X(WHEN, 1) X(WHERE, 1) X(WITH, 1) X(BOTH, 0) X(FETCH, 0) X(FIRST, 0) X(FOR, 0) X(IF, 0)              \
-    X(LAST, 0) X(LATERAL, 0) X(LEADING, 0) X(NATURAL, 0) X(NEXT, 0) X(NULLS, 0) X(ONLY, 0) X(OVER, 0)                 \
+    X(LAST, 0) X(LATERAL, 0) X(LEADING, 0) X(NATURAL, 1) X(NEXT, 0) X(NULLS, 0) X(ONLY, 0) X(OVER, 0)                 \
     X(RECURSIVE, 0) X(ROW, 0) X(ROWS, 0) X(TO, 0) X(TRAILING, 0) X(ISNULL, 0) X(NOTNULL, 0) X(PRIMARY, 0)            \
     X(UNIQUE, 0) X(DEFAULT, 0) X(REFERENCES, 0) X(CHECK, 0) X(CONSTRAINT, 0) X(INDEX, 0) X(VIEW, 0) X(ALTER, 0)      \
     X(TRIGGER, 0) X(WINDOW, 0)

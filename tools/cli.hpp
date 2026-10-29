@@ -35,8 +35,18 @@ struct Settings {
     bool decimal_comma;
     bool stats;
     bool streaming;
+    bool implicit_stdin;  // a SELECT without FROM reads stdin (sel: yes; vdb: no, spec A9)
+    bool stdin_is_sql;    // vdb reads its SQL from stdin: stdin is no table then
     size_t memory_limit;  // 0: none
-    Settings() : delimiter_given(false), output_delimiter_given(false), decimal_comma(false), stats(false), streaming(true), memory_limit(0) {}
+    Settings()
+        : delimiter_given(false),
+          output_delimiter_given(false),
+          decimal_comma(false),
+          stats(false),
+          streaming(true),
+          implicit_stdin(true),
+          stdin_is_sql(false),
+          memory_limit(0) {}
 };
 
 // Parses one CSV/output option at argv[i] (advancing i past its value). Returns 1 when used, 0 when not an option
@@ -58,6 +68,7 @@ public:
     void install();  // becomes the database's table resolver
     void report_notes();  // irregular rows, delimiter hints (stderr)
     size_t rows_read() const;
+    char detected_delimiter() const;  // of the first file read with -d auto, or 0
     vdb::Table* open(const char* name, const char* path, vdb::Status& status);
 
 private:
@@ -72,6 +83,26 @@ private:
     Settings& settings_;
     const char* program_;
     vdb::Vec<Entry> entries_;
+};
+
+// Writes rows with a Formatter; with -d auto and no -D, the output uses the delimiter found in the input.
+class Printer final : public vdb::RowSink {
+public:
+    Printer(vdb::Output& out, Settings& settings, Files& files);
+    ~Printer();
+    bool begin(size_t columns, const char* const* names) override;
+    bool row(const vdb::Row& row) override { return formatter_ && formatter_->row(row); }
+    void end() override {
+        if (formatter_) formatter_->end();
+    }
+    size_t rows() const { return rows_ + (formatter_ ? formatter_->rows() : 0); }
+
+private:
+    vdb::Output& out_;
+    Settings& settings_;
+    Files& files_;
+    vdb::Formatter* formatter_;
+    size_t rows_;
 };
 
 // A heap copy of a C string (free() it); 0 when memory ran out.
