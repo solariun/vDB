@@ -21,7 +21,7 @@ jobs:
     env:
       CXX: ${{ matrix.cxx }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Compiler
         run: $CXX --version
@@ -51,7 +51,7 @@ jobs:
     name: Arduino sketches (ESP32, ATmega2560)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install arduino-cli
         uses: arduino/setup-arduino-cli@v2

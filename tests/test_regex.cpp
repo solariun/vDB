@@ -7,7 +7,7 @@ namespace {
 
 // Returns the first match as "start-end" or "-" for none, or "error: ..." for a bad pattern.
 struct Probe {
-    char out[128];
+    char out[VDB_ERROR_SIZE + 64];  // room for any error message
     Probe(const char* pattern, const char* text, unsigned flags = 0, size_t group = 0) {
         vdb::Pool pool(vdb::heap_allocator());
         vdb::Status status;
